@@ -10,10 +10,10 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
-
 
 func main() {
 	dev := flag.String("d", "COM5", "path to modem device")
@@ -48,10 +48,15 @@ func main() {
 	}
 
 	//go pollSignalQuality(g)
-	go checkForMessages(g)
+	go checkForMessagesToSend(g)
 	err = g.StartMessageRx(
 		func(msg gsm.Message) {
-			saveToDo(msg, g)
+			if strings.Contains(msg.Message, "Get all todos for today") {
+				showMeAllTodosToday(msg, g)
+			} else {
+				saveToDo(msg, g)
+			}
+
 		},
 		func(err error) {
 			log.Printf("err: %v\n", err)
@@ -72,14 +77,40 @@ func main() {
 		}
 	}
 }
+func showMeAllTodosToday(msg gsm.Message, g *gsm.GSM) {
+	log.Println("Get all todos for today")
+	jsonFile, err := os.Open("todos.json")
+	if err != nil {
+		log.Println(err)
+	}
+	var todos []Todo
+	byteValue, _ := ioutil.ReadAll(jsonFile)
 
+	json.Unmarshal(byteValue, &todos)
+	var todayTodos []Todo
+	for i := 0; i < len(todos); i++ {
+		if strings.EqualFold(todos[i].PhoneNo, msg.Number) &&
+			todos[i].Timestamp.Day() == time.Now().Day() &&
+			todos[i].Timestamp.Month() == time.Now().Month() &&
+			todos[i].Timestamp.Year() == time.Now().Year() {
+			todayTodos = append(todayTodos, todos[i])
+
+		}
+	}
+	response := "Today:\n"
+	for _, todo := range todayTodos {
+		response = response + todo.Text + " "+strconv.Itoa(todo.Timestamp.Hour()) + ":" + strconv.Itoa(todo.Timestamp.Minute()) + "\n"
+	}
+	g.SendShortMessage(msg.Number, response)
+
+}
 func saveToDo(msg gsm.Message, g *gsm.GSM) {
 	splittedMessage := strings.Split(msg.Message, "\n")
 	todoText := splittedMessage[0]
 	const layout = "2006-01-02T15:04"
 	at, _ := time.Parse(layout, splittedMessage[1])
 	todo := Todo{Text: todoText,
-		Timestamp: at,PhoneNo:msg.Number }
+		Timestamp: at, PhoneNo: msg.Number}
 	jsonFile, err := os.Open("todos.json")
 	if err != nil {
 		log.Println(err)
@@ -98,37 +129,40 @@ func saveToDo(msg gsm.Message, g *gsm.GSM) {
 type Todo struct {
 	Text      string    `json:"text"`
 	Timestamp time.Time `json:"timestamp"`
-	PhoneNo string `json:"phoneNo"`
+	PhoneNo   string    `json:"phoneNo"`
 }
 
-
-func checkForMessages(g *gsm.GSM) {
+func checkForMessagesToSend(g *gsm.GSM) {
 	log.Println("Started")
 	for {
 		select {
-		case <-time.After(3* time.Minute):
-			jsonFile, err := os.Open("todos.json")
-			if err != nil {
-				log.Println(err)
-			}
-			log.Println("Checking")
-			var todos []Todo
-			byteValue, _ := ioutil.ReadAll(jsonFile)
-
-			json.Unmarshal(byteValue, &todos)
-			for i:=0; i< len(todos); i++ {
-				difference := todos[i].Timestamp.Sub(time.Now().UTC().Add(2*time.Hour))
-				if difference.Minutes() <= 4  {
-					g.SendShortMessage(todos[i].PhoneNo, "You have to "+todos[i].Text+" on "+todos[i].Timestamp.String())
-					todos = append(todos[:i], todos[i+1:]...)
-					i--
-				}
-			}
-
-			file, _ := json.Marshal(todos)
-			_ = ioutil.WriteFile("todos.json", file, 0644)
-			jsonFile.Close()
+		case <-time.After(3 * time.Minute):
+			checkToDoList(g)
 		}
 	}
 }
 
+func checkToDoList(g *gsm.GSM) {
+	jsonFile, err := os.Open("todos.json")
+	if err != nil {
+		log.Println(err)
+	}
+	log.Println("Checking")
+	var todos []Todo
+	byteValue, _ := ioutil.ReadAll(jsonFile)
+
+	json.Unmarshal(byteValue, &todos)
+	for i := 0; i < len(todos); i++ {
+		difference := todos[i].Timestamp.Sub(time.Now().UTC().Add(2 * time.Hour))
+		if difference.Minutes() <= 4 {
+			g.SendShortMessage(todos[i].PhoneNo, "You have to "+todos[i].Text+" at "+
+				strconv.Itoa(todos[i].Timestamp.Hour())+":"+strconv.Itoa(todos[i].Timestamp.Minute()))
+			todos = append(todos[:i], todos[i+1:]...)
+			i--
+		}
+	}
+
+	file, _ := json.Marshal(todos)
+	_ = ioutil.WriteFile("todos.json", file, 0644)
+	jsonFile.Close()
+}
